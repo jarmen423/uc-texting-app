@@ -68,8 +68,30 @@ GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
 
 def get_google_sheet():
     """
-    Authenticate with Google Sheets API and return the worksheet.
-    Uses GOOGLE_CREDENTIALS env var (JSON string).
+    Authenticate with Google Sheets API and return the active worksheet.
+    
+    This function handles the complete OAuth2 authentication flow with Google's
+    Sheets API using service account credentials. It parses credentials from the
+    GOOGLE_CREDENTIALS environment variable, establishes an authorized session,
+    and returns the first worksheet of the configured spreadsheet.
+    
+    This is the central data access layer for the symptom logging system,
+    called by both `append_symptom_log` for writes and `get_last_entries` for reads.
+    
+    Returns:
+        gspread.Worksheet: The first worksheet of the configured Google Sheet,
+            ready for read/write operations.
+    
+    Raises:
+        ValueError: If GOOGLE_CREDENTIALS or GOOGLE_SHEET_ID environment
+            variables are not set.
+        json.JSONDecodeError: If GOOGLE_CREDENTIALS contains invalid JSON.
+        gspread.exceptions.SpreadsheetNotFound: If the sheet ID doesn't exist
+            or the service account lacks access.
+    
+    Key Technologies:
+        - gspread: Google Sheets API client library
+        - oauth2client: ServiceAccountCredentials for authentication
     """
     if not GOOGLE_CREDENTIALS:
         raise ValueError("GOOGLE_CREDENTIALS environment variable not set")
@@ -96,10 +118,28 @@ def get_google_sheet():
     return spreadsheet.sheet1
 
 
-def append_symptom_log(body: str, urgency: int):
+def append_symptom_log(body: str, urgency: int) -> bool:
     """
-    Append a symptom entry to Google Sheets.
-    Columns: [Date, Time, Body, Urgency]
+    Append a symptom entry to the Google Sheets log.
+    
+    Creates a new row in the symptom tracking spreadsheet with the current
+    timestamp and provided symptom data. This function is called from the
+    `/android-webhook` endpoint when a user sends a symptom report via SMS.
+    
+    Args:
+        body: The raw SMS message text containing the symptom description.
+            This is stored as-is without modification.
+        urgency: Urgency rating from 1 (mild) to 10 (severe), extracted
+            from the user's SMS message.
+    
+    Returns:
+        bool: True if the row was successfully appended.
+    
+    Raises:
+        gspread.exceptions.APIError: If Google Sheets API request fails.
+    
+    Key Technologies:
+        - gspread.Worksheet.append_row: Atomic row append operation
     """
     sheet = get_google_sheet()
     now = datetime.now()
@@ -113,10 +153,27 @@ def append_symptom_log(body: str, urgency: int):
     return True
 
 
-def get_last_entries(count: int = 3):
+def get_last_entries(count: int = 3) -> list[dict]:
     """
-    Get the last N entries from the symptom log.
-    Returns list of dicts with Date, Time, Body, Urgency.
+    Retrieve the most recent symptom entries from the log.
+    
+    Fetches all data from the Google Sheet and returns the last N entries.
+    This function is called from the `/android-webhook` endpoint when a
+    user sends the "Summary" command via SMS.
+    
+    Args:
+        count: Number of recent entries to retrieve. Defaults to 3.
+    
+    Returns:
+        list[dict]: A list of dictionaries, each containing:
+            - "date" (str): Entry date in YYYY-MM-DD format
+            - "time" (str): Entry time in HH:MM:SS format 
+            - "body" (str): The symptom description text
+            - "urgency" (str): The urgency rating as a string
+            Returns empty list if no entries exist.
+    
+    Key Technologies:
+        - gspread.Worksheet.get_all_values: Fetches entire sheet content
     """
     sheet = get_google_sheet()
     all_values = sheet.get_all_values()
@@ -140,8 +197,16 @@ def get_last_entries(count: int = 3):
     return entries
 
 
-def get_sheet_url():
-    """Return the public URL for the Google Sheet."""
+def get_sheet_url() -> str:
+    """
+    Generate the public URL for the Google Sheet.
+    
+    Constructs the direct link to the symptom tracking spreadsheet using
+    the configured GOOGLE_SHEET_ID. Called when user sends "Link" command.
+    
+    Returns:
+        str: The full Google Sheets URL for the configured spreadsheet.
+    """
     return f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}"
 
 # ==============================================================================
@@ -150,17 +215,25 @@ def get_sheet_url():
 
 def send_sms_via_android(message_text: str) -> bool:
     """
-    Send SMS through Android phone via Join/AutoRemote.
+    Send SMS through Android phone via Join/AutoRemote push notification.
     
     Makes a GET request to ANDROID_SEND_URL with URL-encoded message.
     The URL should be a Join push URL or AutoRemote endpoint configured
-    to trigger a Tasker task that sends the SMS.
+    to trigger a Tasker task that sends the SMS. This is the gateway for
+    all outbound SMS communication from the bot.
     
     Args:
-        message_text: The SMS content to send.
-        
+        message_text: The SMS content to send. Will be URL-encoded
+            automatically before transmission.
+    
     Returns:
-        True if request succeeded, False otherwise.
+        bool: True if the push request succeeded (HTTP 2xx), False if
+            ANDROID_SEND_URL is not configured or request failed.
+    
+    Key Technologies:
+        - requests: HTTP library for the GET request
+        - urllib.parse.quote: URL encoding for the message text
+        - Join/AutoRemote: Cloud-to-device push notification services
     """
     if not ANDROID_SEND_URL:
         app.logger.error("ANDROID_SEND_URL not configured")
